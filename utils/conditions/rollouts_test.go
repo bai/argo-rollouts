@@ -332,25 +332,25 @@ func TestVerifyRolloutSpecCanary(t *testing.T) {
 			reason:   InvalidSpecReason,
 			message:  InvalidMaxSurgeMaxUnavailable,
 		},
-		{
-			name: "setWeight and pause both set",
-			steps: []v1alpha1.CanaryStep{{
-				Pause:     &v1alpha1.RolloutPause{},
-				SetWeight: pointer.Int32Ptr(10),
-			}},
+		// {
+		// 	name: "setWeight and pause both set",
+		// 	steps: []v1alpha1.CanaryStep{{
+		// 		Pause:     &v1alpha1.RolloutPause{},
+		// 		SetWeight: pointer.Int32Ptr(10),
+		// 	}},
 
-			notValid: true,
-			reason:   InvalidSpecReason,
-			message:  InvalidStepMessage,
-		},
-		{
-			name:  "Nether setWeight and pause are set",
-			steps: []v1alpha1.CanaryStep{{}},
+		// 	notValid: true,
+		// 	reason:   InvalidSpecReason,
+		// 	message:  InvalidStepMessage,
+		// },
+		// {
+		// 	name:  "Nether setWeight and pause are set",
+		// 	steps: []v1alpha1.CanaryStep{{}},
 
-			notValid: true,
-			reason:   InvalidSpecReason,
-			message:  InvalidStepMessage,
-		},
+		// 	notValid: true,
+		// 	reason:   InvalidSpecReason,
+		// 	message:  InvalidStepMessage,
+		// },
 		{
 			name: "setWeight over 0",
 			steps: []v1alpha1.CanaryStep{{

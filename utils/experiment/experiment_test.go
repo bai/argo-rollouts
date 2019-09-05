@@ -84,3 +84,22 @@ func TestGetTemplateStatusMapping(t *testing.T) {
 	assert.Equal(t, int32(1), mapping["test"].Replicas)
 	assert.Equal(t, int32(2), mapping["test2"].Replicas)
 }
+func TestReplicaSetNameFromExperiment(t *testing.T) {
+	template := v1alpha1.TemplateSpec{
+		Name: "template",
+	}
+	e := &v1alpha1.Experiment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "foo",
+		},
+	}
+	assert.Equal(t, ReplicasetNameFromExperiment(e, template), "foo-template-685bdb47d8")
+}
+
+func TestGetCurrentExperiment(t *testing.T) {
+
+}
+
+func TestExperimentByCreationTimestamp(t *testing.T) {
+
+}

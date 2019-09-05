@@ -146,6 +146,9 @@ func ExperimentCompleted(newStatus v1alpha1.ExperimentStatus) bool {
 	if newStatus.Running != nil && *newStatus.Running {
 		return false
 	}
+	// if experiment.Status.AvailableAt != nil {
+	// 	return false
+	// }
 	new := experimentutil.GetTemplateStatusMapping(newStatus)
 	for i := range new {
 		status := new[i]

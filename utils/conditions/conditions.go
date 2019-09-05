@@ -315,7 +315,7 @@ func VerifyRolloutSpec(rollout *v1alpha1.Rollout, prevCond *v1alpha1.RolloutCond
 			return newInvalidSpecRolloutCondition(prevCond, InvalidSpecReason, InvalidMaxSurgeMaxUnavailable)
 		}
 		for _, step := range rollout.Spec.Strategy.CanaryStrategy.Steps {
-			if (step.Pause != nil && step.SetWeight != nil) || (step.Pause == nil && step.SetWeight == nil) {
+			if (step.Pause != nil && step.SetWeight != nil && step.Experiment != nil) || (step.Pause == nil && step.SetWeight == nil && step.Experiment == nil) {
 				return newInvalidSpecRolloutCondition(prevCond, InvalidSpecReason, InvalidStepMessage)
 			}
 			if step.SetWeight != nil && (*step.SetWeight < 0 || *step.SetWeight > 100) {

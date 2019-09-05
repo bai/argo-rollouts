@@ -91,7 +91,7 @@ func (c *RolloutController) getNewReplicaSet(rollout *v1alpha1.Rollout, rsList, 
 		if needsUpdate {
 			var err error
 			logCtx.Info("Setting revision annotation after creating a new replicaset")
-			if rollout, err = c.rolloutsclientset.ArgoprojV1alpha1().Rollouts(rollout.Namespace).Update(rollout); err != nil {
+			if rollout, err = c.argoprojclientset.ArgoprojV1alpha1().Rollouts(rollout.Namespace).Update(rollout); err != nil {
 				logCtx.WithError(err).Errorf("Error: Setting rollout revision annotation after creating a new replicaset")
 				return nil, err
 			}
@@ -170,7 +170,7 @@ func (c *RolloutController) getNewReplicaSet(rollout *v1alpha1.Rollout, rsList, 
 		*rollout.Status.CollisionCount++
 		// Update the collisionCount for the Rollout and let it requeue by returning the original
 		// error.
-		_, roErr := c.rolloutsclientset.ArgoprojV1alpha1().Rollouts(rollout.Namespace).Update(rollout)
+		_, roErr := c.argoprojclientset.ArgoprojV1alpha1().Rollouts(rollout.Namespace).Update(rollout)
 		if roErr == nil {
 			logCtx.Warnf("Found a hash collision - bumped collisionCount (%d->%d) to resolve it", preCollisionCount, *rollout.Status.CollisionCount)
 		}
@@ -198,7 +198,7 @@ func (c *RolloutController) getNewReplicaSet(rollout *v1alpha1.Rollout, rsList, 
 	}
 
 	if needsUpdate {
-		_, err = c.rolloutsclientset.ArgoprojV1alpha1().Rollouts(rollout.Namespace).Update(rollout)
+		_, err = c.argoprojclientset.ArgoprojV1alpha1().Rollouts(rollout.Namespace).Update(rollout)
 	}
 	return createdRS, err
 }
@@ -507,7 +507,7 @@ func (c *RolloutController) persistRolloutStatus(orig *v1alpha1.Rollout, newStat
 		return nil
 	}
 	logCtx.Debugf("Rollout Patch: %s", patch)
-	_, err = c.rolloutsclientset.ArgoprojV1alpha1().Rollouts(orig.Namespace).Patch(orig.Name, patchtypes.MergePatchType, patch)
+	_, err = c.argoprojclientset.ArgoprojV1alpha1().Rollouts(orig.Namespace).Patch(orig.Name, patchtypes.MergePatchType, patch)
 	if err != nil {
 		logCtx.Warningf("Error updating application: %v", err)
 		return err

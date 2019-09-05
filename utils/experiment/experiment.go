@@ -1,9 +1,12 @@
 package experiment
 
 import (
+	"fmt"
+	"sort"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/kubernetes/pkg/controller"
 
 	"github.com/argoproj/argo-rollouts/pkg/apis/rollouts/v1alpha1"
 	"github.com/argoproj/argo-rollouts/utils/defaults"
@@ -45,4 +48,82 @@ func GetTemplateStatusMapping(status v1alpha1.ExperimentStatus) map[string]v1alp
 		mapping[template.Name] = template
 	}
 	return mapping
+}
+
+func GetCollisionCountForTemplate(experiment *v1alpha1.Experiment, template v1alpha1.TemplateSpec) *int32 {
+	templateStatuses := GetTemplateStatusMapping(experiment.Status)
+	templateStatus := templateStatuses[template.Name]
+	var collisionCount *int32
+	if templateStatus.CollisionCount != nil {
+		collisionCount = templateStatus.CollisionCount
+	}
+	return collisionCount
+}
+
+func ReplicasetNameFromExperiment(experiment *v1alpha1.Experiment, template v1alpha1.TemplateSpec) string {
+	collisionCount := GetCollisionCountForTemplate(experiment, template)
+	podTemplateSpecHash := controller.ComputeHash(&template.Template, collisionCount)
+	return fmt.Sprintf("%s-%s-%s", experiment.Name, template.Name, podTemplateSpecHash)
+}
+
+// GetCurrentExperiment grabs the experiment that matches the current rollout
+func GetCurrentExperiment(rollout *v1alpha1.Rollout, exList []*v1alpha1.Experiment) *v1alpha1.Experiment {
+	var newExList []*v1alpha1.Experiment
+	for _, ex := range newExList {
+		if ex != nil {
+			newExList = append(newExList, ex)
+		}
+	}
+	exList = newExList
+	sort.Sort(ExperimentByCreationTimestamp(exList))
+	// First, attempt to find the experiment by the replicaset naming formula
+	rsHash := controller.ComputeHash(&rollout.Spec.Template, rollout.Status.CollisionCount)
+	experimentName := fmt.Sprintf("%s-%s", rollout.Name, rsHash)
+	for i := range exList {
+		ex := exList[i]
+		if ex.Name == experimentName {
+			return ex
+		}
+
+	}
+	// // Iterate the ReplicaSet list again, this time doing a deep equal against the template specs.
+	// // This covers the corner case in which the reason we did not find the replicaset, was because
+	// // of a change in the controller.ComputeHash function (e.g. due to an update of k8s libraries).
+	// // When this (rare) situation arises, we do not want to return nil, since nil is considered a
+	// // PodTemplate change, which in turn would triggers an unexpected redeploy of the replicaset.
+	// for _, ex := range exList {
+	// 	if PodTemplateEqualIgnoreHash(&rs.Spec.Template, &rollout.Spec.Template) {
+	// 		logCtx := logutil.WithRollout(rollout)
+	// 		logCtx.Infof("ComputeHash change detected (expected: %s, actual: %s)", replicaSetName, rs.Name)
+	// 		return rs
+	// 	}
+	// }
+	// new Experiment does not exist.
+	return nil
+}
+
+// GetOldExperiments returns the old experiments from list of experiments.
+func GetOldExperiments(rollout *v1alpha1.Rollout, exList []*v1alpha1.Experiment) []*v1alpha1.Experiment {
+	var allExs []*v1alpha1.Experiment
+	currentEx := GetCurrentExperiment(rollout, allExs)
+	for _, ex := range exList {
+		// Filter out new replica set
+		if currentEx != nil && ex.UID == currentEx.UID {
+			continue
+		}
+		allExs = append(allExs, ex)
+	}
+	return allExs
+}
+
+// ExperimentByCreationTimestamp sorts a list of experiment by creation timestamp, using their creation timestamp as a tie breaker.
+type ExperimentByCreationTimestamp []*v1alpha1.Experiment
+
+func (o ExperimentByCreationTimestamp) Len() int      { return len(o) }
+func (o ExperimentByCreationTimestamp) Swap(i, j int) { o[i], o[j] = o[j], o[i] }
+func (o ExperimentByCreationTimestamp) Less(i, j int) bool {
+	if o[i].CreationTimestamp.Equal(&o[j].CreationTimestamp) {
+		return o[i].Name < o[j].Name
+	}
+	return o[i].CreationTimestamp.Before(&o[j].CreationTimestamp)
 }
