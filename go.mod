@@ -20,8 +20,8 @@ require (
 	github.com/lunixbochs/vtclean v1.0.0 // indirect
 	github.com/newrelic/newrelic-client-go v0.49.0
 	github.com/pkg/errors v0.9.1
-	github.com/prometheus/client_golang v1.8.0
-	github.com/prometheus/common v0.18.0
+	github.com/prometheus/client_golang v1.11.0
+	github.com/prometheus/common v0.26.0
 	github.com/servicemeshinterface/smi-sdk-go v0.4.1
 	github.com/sirupsen/logrus v1.7.0
 	github.com/soheilhy/cmux v0.1.4
@@ -35,7 +35,7 @@ require (
 	google.golang.org/genproto v0.0.0-20201110150050-8816d57aaa9a
 	google.golang.org/grpc v1.33.1
 	google.golang.org/grpc/examples v0.0.0-20210331235824-f6bb3972ed15 // indirect
-	google.golang.org/protobuf v1.25.0
+	google.golang.org/protobuf v1.26.0-rc.1
 	gopkg.in/yaml.v2 v2.4.0
 	gopkg.in/yaml.v3 v3.0.0-20210107192922-496545a6307b // indirect
 	k8s.io/api v0.20.4
