@@ -28,7 +28,6 @@ import (
 	v1 "k8s.io/client-go/listers/core/v1"
 	extensionslisters "k8s.io/client-go/listers/extensions/v1beta1"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/kubectl/pkg/util/slice"
 	"k8s.io/kubernetes/pkg/controller"
@@ -50,10 +49,15 @@ import (
 	experimentutil "github.com/argoproj/argo-rollouts/utils/experiment"
 	istioutil "github.com/argoproj/argo-rollouts/utils/istio"
 	logutil "github.com/argoproj/argo-rollouts/utils/log"
+	"github.com/argoproj/argo-rollouts/utils/record"
 	replicasetutil "github.com/argoproj/argo-rollouts/utils/replicaset"
 	serviceutil "github.com/argoproj/argo-rollouts/utils/service"
 	unstructuredutil "github.com/argoproj/argo-rollouts/utils/unstructured"
 )
+
+type TemplateRefResolver interface {
+	Resolve(r *v1alpha1.Rollout) error
+}
 
 // Controller is the controller implementation for Rollout resources
 type Controller struct {
@@ -82,6 +86,7 @@ type ControllerConfig struct {
 	KubeClientSet                   kubernetes.Interface
 	ArgoProjClientset               clientset.Interface
 	DynamicClientSet                dynamic.Interface
+	RefResolver                     TemplateRefResolver
 	SmiClientSet                    smiclientset.Interface
 	ExperimentInformer              informers.ExperimentInformer
 	AnalysisRunInformer             informers.AnalysisRunInformer
@@ -91,6 +96,7 @@ type ControllerConfig struct {
 	ServicesInformer                coreinformers.ServiceInformer
 	IngressInformer                 extensionsinformers.IngressInformer
 	RolloutsInformer                informers.RolloutInformer
+	IstioPrimaryDynamicClient       dynamic.Interface
 	IstioVirtualServiceInformer     cache.SharedIndexInformer
 	IstioDestinationRuleInformer    cache.SharedIndexInformer
 	ResyncPeriod                    time.Duration
@@ -112,6 +118,8 @@ type reconcilerBase struct {
 	// It is used to interact with TrafficRouting resources
 	dynamicclientset dynamic.Interface
 	smiclientset     smiclientset.Interface
+
+	refResolver TemplateRefResolver
 
 	replicaSetLister              appslisters.ReplicaSetLister
 	replicaSetSynced              cache.InformerSynced
@@ -144,7 +152,7 @@ func NewController(cfg ControllerConfig) *Controller {
 
 	replicaSetControl := controller.RealRSControl{
 		KubeClient: cfg.KubeClientSet,
-		Recorder:   cfg.Recorder,
+		Recorder:   cfg.Recorder.K8sRecorder(),
 	}
 
 	podRestarter := RolloutPodRestarter{
@@ -175,6 +183,7 @@ func NewController(cfg ControllerConfig) *Controller {
 		recorder:                      cfg.Recorder,
 		resyncPeriod:                  cfg.ResyncPeriod,
 		podRestarter:                  podRestarter,
+		refResolver:                   cfg.RefResolver,
 	}
 
 	controller := &Controller{
@@ -195,7 +204,7 @@ func NewController(cfg ControllerConfig) *Controller {
 
 	controller.IstioController = istio.NewIstioController(istio.IstioControllerConfig{
 		ArgoprojClientSet:       cfg.ArgoProjClientset,
-		DynamicClientSet:        cfg.DynamicClientSet,
+		DynamicClientSet:        cfg.IstioPrimaryDynamicClient,
 		EnqueueRollout:          controller.enqueueRollout,
 		RolloutsInformer:        cfg.RolloutsInformer,
 		VirtualServiceInformer:  cfg.IstioVirtualServiceInformer,
@@ -352,6 +361,23 @@ func (c *Controller) syncHandler(key string) error {
 		return nil
 	}
 
+	defer func() {
+		duration := time.Since(startTime)
+		c.metricsServer.IncRolloutReconcile(r, duration)
+		logCtx.WithField("time_ms", duration.Seconds()*1e3).Info("Reconciliation completed")
+	}()
+
+	resolveErr := c.refResolver.Resolve(r)
+	roCtx, err := c.newRolloutContext(r)
+	if err != nil {
+		logCtx.Errorf("newRolloutContext err %v", err)
+		return err
+	}
+	if resolveErr != nil {
+		roCtx.createInvalidRolloutCondition(resolveErr, r)
+		return resolveErr
+	}
+
 	// In order to work with HPA, the rollout.Spec.Replica field cannot be nil. As a result, the controller will update
 	// the rollout to have the replicas field set to the default value. see https://github.com/argoproj/argo-rollouts/issues/119
 	if rollout.Spec.Replicas == nil {
@@ -360,19 +386,13 @@ func (c *Controller) syncHandler(key string) error {
 		_, err := c.argoprojclientset.ArgoprojV1alpha1().Rollouts(r.Namespace).Update(ctx, r, metav1.UpdateOptions{})
 		return err
 	}
-	defer func() {
-		duration := time.Since(startTime)
-		c.metricsServer.IncRolloutReconcile(r, duration)
-		logCtx.WithField("time_ms", duration.Seconds()*1e3).Info("Reconciliation completed")
-	}()
 
-	roCtx, err := c.newRolloutContext(r)
-	if err != nil {
-		return err
-	}
 	err = roCtx.reconcile()
 	if roCtx.newRollout != nil {
 		c.writeBackToInformer(roCtx.newRollout)
+	}
+	if err != nil {
+		logCtx.Errorf("roCtx.reconcile err %v", err)
 	}
 	return err
 }
@@ -405,7 +425,7 @@ func (c *Controller) newRolloutContext(rollout *v1alpha1.Rollout) (*rolloutConte
 	newRS := replicasetutil.FindNewReplicaSet(rollout, rsList)
 	olderRSs := replicasetutil.FindOldReplicaSets(rollout, rsList)
 	stableRS := replicasetutil.GetStableRS(rollout, newRS, olderRSs)
-	otherRSs := replicasetutil.GetOtherRSs(rollout, newRS, stableRS, olderRSs)
+	otherRSs := replicasetutil.GetOtherRSs(rollout, newRS, stableRS, rsList)
 
 	exList, err := c.getExperimentsForRollout(rollout)
 	if err != nil {
@@ -498,7 +518,7 @@ func (c *rolloutContext) getRolloutReferencedResources() (*validation.Referenced
 	if err != nil {
 		return nil, err
 	}
-	refResources.AnalysisTemplateWithType = *analysisTemplates
+	refResources.AnalysisTemplatesWithType = *analysisTemplates
 
 	ingresses, err := c.getReferencedIngresses()
 	if err != nil {
@@ -612,8 +632,8 @@ func (c *rolloutContext) getReferencedServices() (*[]validation.ServiceWithType,
 	return &services, nil
 }
 
-func (c *rolloutContext) getReferencedRolloutAnalyses() (*[]validation.AnalysisTemplateWithType, error) {
-	analysisTemplates := []validation.AnalysisTemplateWithType{}
+func (c *rolloutContext) getReferencedRolloutAnalyses() (*[]validation.AnalysisTemplatesWithType, error) {
+	analysisTemplates := make([]validation.AnalysisTemplatesWithType, 0)
 	if c.rollout.Spec.Strategy.BlueGreen != nil {
 		blueGreen := c.rollout.Spec.Strategy.BlueGreen
 		if blueGreen.PrePromotionAnalysis != nil {
@@ -622,7 +642,8 @@ func (c *rolloutContext) getReferencedRolloutAnalyses() (*[]validation.AnalysisT
 			if err != nil {
 				return nil, err
 			}
-			analysisTemplates = append(analysisTemplates, templates...)
+			templates.Args = blueGreen.PrePromotionAnalysis.Args
+			analysisTemplates = append(analysisTemplates, *templates)
 		}
 
 		if blueGreen.PostPromotionAnalysis != nil {
@@ -631,7 +652,8 @@ func (c *rolloutContext) getReferencedRolloutAnalyses() (*[]validation.AnalysisT
 			if err != nil {
 				return nil, err
 			}
-			analysisTemplates = append(analysisTemplates, templates...)
+			templates.Args = blueGreen.PostPromotionAnalysis.Args
+			analysisTemplates = append(analysisTemplates, *templates)
 		}
 	} else if c.rollout.Spec.Strategy.Canary != nil {
 		canary := c.rollout.Spec.Strategy.Canary
@@ -641,7 +663,8 @@ func (c *rolloutContext) getReferencedRolloutAnalyses() (*[]validation.AnalysisT
 				if err != nil {
 					return nil, err
 				}
-				analysisTemplates = append(analysisTemplates, templates...)
+				templates.Args = step.Analysis.Args
+				analysisTemplates = append(analysisTemplates, *templates)
 			}
 		}
 		if canary.Analysis != nil {
@@ -649,54 +672,45 @@ func (c *rolloutContext) getReferencedRolloutAnalyses() (*[]validation.AnalysisT
 			if err != nil {
 				return nil, err
 			}
-			analysisTemplates = append(analysisTemplates, templates...)
+			templates.Args = canary.Analysis.Args
+			analysisTemplates = append(analysisTemplates, *templates)
 		}
 	}
 	return &analysisTemplates, nil
 }
 
-func (c *rolloutContext) getReferencedAnalysisTemplates(rollout *v1alpha1.Rollout, rolloutAnalysis *v1alpha1.RolloutAnalysis, templateType validation.AnalysisTemplateType, canaryStepIndex int) ([]validation.AnalysisTemplateWithType, error) {
-	analysisTemplates := []validation.AnalysisTemplateWithType{}
-	if rolloutAnalysis.Templates != nil {
-		for i, template := range rolloutAnalysis.Templates {
-			analysisTemplate, err := c.getReferencedAnalysisTemplate(template, templateType, i, canaryStepIndex)
+func (c *rolloutContext) getReferencedAnalysisTemplates(rollout *v1alpha1.Rollout, rolloutAnalysis *v1alpha1.RolloutAnalysis, templateType validation.AnalysisTemplateType, canaryStepIndex int) (*validation.AnalysisTemplatesWithType, error) {
+	templates := make([]*v1alpha1.AnalysisTemplate, 0)
+	clusterTemplates := make([]*v1alpha1.ClusterAnalysisTemplate, 0)
+	fldPath := validation.GetAnalysisTemplateWithTypeFieldPath(templateType, canaryStepIndex)
+
+	for _, templateRef := range rolloutAnalysis.Templates {
+		if templateRef.ClusterScope {
+			template, err := c.clusterAnalysisTemplateLister.Get(templateRef.TemplateName)
 			if err != nil {
+				if k8serrors.IsNotFound(err) {
+					return nil, field.Invalid(fldPath, templateRef.TemplateName, fmt.Sprintf("ClusterAnalysisTemplate '%s' not found", templateRef.TemplateName))
+				}
 				return nil, err
 			}
-			if analysisTemplate != nil {
-				analysisTemplates = append(analysisTemplates, *analysisTemplate)
+			clusterTemplates = append(clusterTemplates, template)
+		} else {
+			template, err := c.analysisTemplateLister.AnalysisTemplates(c.rollout.Namespace).Get(templateRef.TemplateName)
+			if err != nil {
+				if k8serrors.IsNotFound(err) {
+					return nil, field.Invalid(fldPath, templateRef.TemplateName, fmt.Sprintf("AnalysisTemplate '%s' not found", templateRef.TemplateName))
+				}
+				return nil, err
 			}
+			templates = append(templates, template)
 		}
 	}
-	return analysisTemplates, nil
-}
 
-func (c *rolloutContext) getReferencedAnalysisTemplate(template v1alpha1.RolloutAnalysisTemplate, templateType validation.AnalysisTemplateType, analysisIndex int, canaryStepIndex int) (*validation.AnalysisTemplateWithType, error) {
-	fldPath := validation.GetAnalysisTemplateWithTypeFieldPath(templateType, analysisIndex, canaryStepIndex)
-	if template.ClusterScope {
-		clusterAnalysisTemplate, err := c.clusterAnalysisTemplateLister.Get(template.TemplateName)
-		if k8serrors.IsNotFound(err) {
-			return nil, field.Invalid(fldPath, template.TemplateName, err.Error())
-		}
-		if err != nil {
-			return nil, err
-		}
-		return &validation.AnalysisTemplateWithType{
-			ClusterAnalysisTemplate: clusterAnalysisTemplate,
-			TemplateType:            templateType,
-			AnalysisIndex:           analysisIndex,
-		}, nil
-	}
-	analysisTemplate, err := c.analysisTemplateLister.AnalysisTemplates(c.rollout.Namespace).Get(template.TemplateName)
-	if k8serrors.IsNotFound(err) {
-		return nil, field.Invalid(fldPath, template.TemplateName, err.Error())
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &validation.AnalysisTemplateWithType{
-		AnalysisTemplate: analysisTemplate,
-		TemplateType:     templateType,
+	return &validation.AnalysisTemplatesWithType{
+		AnalysisTemplates:        templates,
+		ClusterAnalysisTemplates: clusterTemplates,
+		TemplateType:             templateType,
+		CanaryStepIndex:          canaryStepIndex,
 	}, nil
 }
 

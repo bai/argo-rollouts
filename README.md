@@ -15,7 +15,7 @@ Argo Rollouts (optionally) integrates with ingress controllers and service meshe
 
 ```
 kubectl create namespace argo-rollouts
-kubectl apply -n argo-rollouts -f https://raw.githubusercontent.com/argoproj/argo-rollouts/stable/manifests/install.yaml
+kubectl apply -n argo-rollouts -f https://github.com/argoproj/argo-rollouts/releases/latest/download/install.yaml
 ```
 
 Follow the full [getting started guide](docs/getting-started.md) to walk through creating and then updating a rollout object. 
@@ -39,7 +39,7 @@ For these reasons, in large scale high-volume production environments, a rolling
 * Customizable metric queries and analysis of business KPIs
 * Ingress controller integration: NGINX, ALB
 * Service Mesh integration: Istio, Linkerd, SMI
-* Metric provider integration: Prometheus, Wavefront, Kayenta, Web, Kubernetes Jobs
+* Metric provider integration: Prometheus, Wavefront, Kayenta, Web, Kubernetes Jobs, Datadog, New Relic
 
 ## Documentation
 To learn more about Argo Rollouts go to the [complete documentation](https://argoproj.github.io/argo-rollouts/).
@@ -60,5 +60,6 @@ To learn more about Argo Rollouts go to the [complete documentation](https://arg
 * [Kubernetes canary deployments with Argo Rollouts](https://www.youtube.com/watch?v=fviYWA2mcF8)
 * [GitOps with Argo CD and an Argo Rollouts canary release](https://www.youtube.com/watch?v=35Qimb_AZ8U)
 * [Multi-Stage Delivery with Keptn and Argo Rollouts](https://www.youtube.com/watch?v=w-E8FzTbN3g&t=1s)
+* [Gradual Code Releases Using an In-House Kubernetes Canary Controller on top of Argo Rollouts](https://doordash.engineering/2021/04/14/gradual-code-releases-using-an-in-house-kubernetes-canary-controller/)
 
 

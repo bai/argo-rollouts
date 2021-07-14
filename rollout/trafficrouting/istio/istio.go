@@ -4,20 +4,21 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	jsonpatch "github.com/evanphx/json-patch/v5"
+	"github.com/mitchellh/mapstructure"
 	log "github.com/sirupsen/logrus"
-	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/dynamic/dynamiclister"
-	"k8s.io/client-go/tools/record"
 
 	"github.com/argoproj/argo-rollouts/pkg/apis/rollouts/v1alpha1"
 	istioutil "github.com/argoproj/argo-rollouts/utils/istio"
 	logutil "github.com/argoproj/argo-rollouts/utils/log"
+	"github.com/argoproj/argo-rollouts/utils/record"
 )
 
 const Type = "Istio"
@@ -82,10 +83,6 @@ func (patches virtualServicePatches) patchVirtualService(httpRoutes []interface{
 func (r *Reconciler) generateVirtualServicePatches(httpRoutes []VirtualServiceHTTPRoute, desiredWeight int64) virtualServicePatches {
 	canarySvc := r.rollout.Spec.Strategy.Canary.CanaryService
 	stableSvc := r.rollout.Spec.Strategy.Canary.StableService
-	routes := map[string]bool{}
-	for _, r := range r.rollout.Spec.Strategy.Canary.TrafficRouting.Istio.VirtualService.Routes {
-		routes[r] = true
-	}
 	canarySubset := ""
 	stableSubset := ""
 	if r.rollout.Spec.Strategy.Canary.TrafficRouting.Istio.DestinationRule != nil {
@@ -93,21 +90,28 @@ func (r *Reconciler) generateVirtualServicePatches(httpRoutes []VirtualServiceHT
 		stableSubset = r.rollout.Spec.Strategy.Canary.TrafficRouting.Istio.DestinationRule.StableSubsetName
 	}
 
+	// err can be ignored because we already called ValidateHTTPRoutes earlier
+	routeIndexesToPatch, _ := getRouteIndexesToPatch(r.rollout.Spec.Strategy.Canary.TrafficRouting.Istio.VirtualService.Routes, httpRoutes)
+
 	patches := virtualServicePatches{}
-	for i := range httpRoutes {
-		route := httpRoutes[i]
-		if !routes[route.Name] {
-			continue
-		}
+	for _, routeIdx := range routeIndexesToPatch {
+		route := httpRoutes[routeIdx]
 		for j := range route.Route {
-			destination := httpRoutes[i].Route[j]
-			host := destination.Destination.Host
+			destination := route.Route[j]
+
+			var host string
+			if idx := strings.Index(destination.Destination.Host, "."); idx > 0 {
+				host = destination.Destination.Host[:idx]
+			} else if idx < 0 {
+				host = destination.Destination.Host
+			}
+
 			subset := destination.Destination.Subset
 			weight := destination.Weight
 			if (host != "" && host == canarySvc) || (subset != "" && subset == canarySubset) {
 				if weight != desiredWeight {
 					patch := virtualServicePatch{
-						routeIndex:       i,
+						routeIndex:       routeIdx,
 						destinationIndex: j,
 						weight:           desiredWeight,
 					}
@@ -117,7 +121,7 @@ func (r *Reconciler) generateVirtualServicePatches(httpRoutes []VirtualServiceHT
 			if (host != "" && host == stableSvc) || (subset != "" && subset == stableSubset) {
 				if weight != 100-desiredWeight {
 					patch := virtualServicePatch{
-						routeIndex:       i,
+						routeIndex:       routeIdx,
 						destinationIndex: j,
 						weight:           100 - desiredWeight,
 					}
@@ -145,7 +149,10 @@ func (r *Reconciler) reconcileVirtualService(obj *unstructured.Unstructured, des
 	}
 
 	patches := r.generateVirtualServicePatches(httpRoutes, int64(desiredWeight))
-	patches.patchVirtualService(httpRoutesI)
+	err = patches.patchVirtualService(httpRoutesI)
+	if err != nil {
+		return nil, false, err
+	}
 
 	err = unstructured.SetNestedSlice(newObj.Object, httpRoutesI, "spec", "http")
 	return newObj, len(patches) > 0, err
@@ -169,8 +176,7 @@ func (r *Reconciler) UpdateHash(canaryHash, stableHash string) error {
 
 	if err != nil {
 		if k8serrors.IsNotFound(err) {
-			msg := fmt.Sprintf("DestinationRule `%s` not found", dRuleSpec.Name)
-			r.recorder.Event(r.rollout, corev1.EventTypeWarning, "DestinationRuleNotFound", msg)
+			r.recorder.Warnf(r.rollout, record.EventOptions{EventReason: "DestinationRuleNotFound"}, "DestinationRule `%s` not found", dRuleSpec.Name)
 		}
 		return err
 	}
@@ -209,11 +215,45 @@ func (r *Reconciler) UpdateHash(canaryHash, stableHash string) error {
 		return err
 	}
 	if modified {
-		msg := fmt.Sprintf("DestinationRule %s subset updated (%s: %s, %s: %s)", dRuleSpec.Name, dRuleSpec.CanarySubsetName, canaryHash, dRuleSpec.StableSubsetName, stableHash)
-		r.log.Info(msg)
-		r.recorder.Event(r.rollout, corev1.EventTypeNormal, "UpdatedDestinationRule", msg)
+		r.recorder.Eventf(r.rollout, record.EventOptions{EventReason: "UpdatedDestinationRule"},
+			"DestinationRule %s subset updated (%s: %s, %s: %s)", dRuleSpec.Name, dRuleSpec.CanarySubsetName, canaryHash, dRuleSpec.StableSubsetName, stableHash)
 	}
 	return nil
+}
+
+// destinationRuleReplaceExtraMarshal relace the key of "Extra" with the actual content
+// e.g., "trafficpolicy" and return the bytes of the new object
+func destinationRuleReplaceExtraMarshal(dRule *DestinationRule) []byte {
+	dRuleNew := map[string]interface{}{}
+	dRuleNew["metadata"] = dRule.ObjectMeta.DeepCopy()
+
+	subsets := []map[string]interface{}{}
+	for _, subset := range dRule.Spec.Subsets {
+		newsubset := map[string]interface{}{}
+		newsubset["name"] = subset.Name
+		newsubset["labels"] = subset.Labels
+
+		if subset.Extra == nil {
+			subsets = append(subsets, newsubset)
+			continue
+		}
+
+		extra := map[string]interface{}{}
+		inputbyte, _ := json.Marshal(subset.Extra)
+		json.Unmarshal(inputbyte, &extra)
+
+		subset.Extra = nil
+		for k, v := range extra {
+			newsubset[k] = v
+		}
+		subsets = append(subsets, newsubset)
+	}
+	dRuleNew["spec"] = map[string]interface{}{
+		"subsets": subsets,
+	}
+
+	dRuleNewBytes, _ := json.Marshal(dRuleNew)
+	return dRuleNewBytes
 }
 
 func updateDestinationRule(ctx context.Context, client dynamic.ResourceInterface, orig []byte, dRule, dRuleNew *DestinationRule) (bool, error) {
@@ -221,10 +261,9 @@ func updateDestinationRule(ctx context.Context, client dynamic.ResourceInterface
 	if err != nil {
 		return false, err
 	}
-	dRuleNewBytes, err := json.Marshal(dRuleNew)
-	if err != nil {
-		return false, err
-	}
+	dRuleNewBytes := destinationRuleReplaceExtraMarshal(dRuleNew)
+	log.Debugf("dRuleNewBytes: %s", string(dRuleNewBytes))
+
 	patch, err := jsonpatch.CreateMergePatch(dRuleBytes, dRuleNewBytes)
 	if err != nil {
 		return false, err
@@ -245,7 +284,7 @@ func updateDestinationRule(ctx context.Context, client dynamic.ResourceInterface
 	if err != nil {
 		return false, err
 	}
-	log.Infof("updated destinationrule: %s", string(patch))
+	log.Infof("updating destinationrule: %s", string(patch))
 	return true, nil
 }
 
@@ -267,9 +306,94 @@ func unstructuredToDestinationRules(un *unstructured.Unstructured) ([]byte, *Des
 	return dRuleBytes, dRule1, dRule2, nil
 }
 
+func unMarshalSubsets(dRule *DestinationRule, dRuleBytes []byte) error {
+	var err error
+
+	unstructured := map[string]interface{}{}
+	var extractFieldBytes func([]byte, string) ([]byte, error)
+	extractFieldBytes = func(input []byte, name string) ([]byte, error) {
+		err = json.Unmarshal(input, &unstructured)
+		if err != nil {
+			return nil, err
+		}
+		fieldBytes, err := json.Marshal(unstructured[name])
+		if err != nil {
+			return nil, err
+		}
+		return fieldBytes, nil
+	}
+
+	specBytes, err := extractFieldBytes(dRuleBytes, "spec")
+	if err != nil {
+		return err
+	}
+
+	subsetsBytes, err := extractFieldBytes(specBytes, "subsets")
+	if err != nil {
+		return err
+	}
+
+	subsetsMap := []map[string]interface{}{}
+	err = json.Unmarshal(subsetsBytes, &subsetsMap)
+	if err != nil {
+		return err
+	}
+
+	dRule.Spec.Subsets = []Subset{}
+	for _, si := range subsetsMap {
+		var subset Subset
+
+		jsonInput, _ := json.Marshal(si)
+		extra, err := UnmarshalJson(jsonInput, &subset)
+		if err != nil {
+			return err
+		}
+
+		subset.Extra = extra
+		if len(subset.Extra) == 0 {
+			subset.Extra = nil
+		}
+		dRule.Spec.Subsets = append(dRule.Spec.Subsets, subset)
+	}
+	return nil
+}
+
+func UnmarshalJson(input []byte, result interface{}) (map[string]interface{}, error) {
+	// unmarshal json to a map
+	foomap := make(map[string]interface{})
+	json.Unmarshal(input, &foomap)
+
+	// create a mapstructure decoder
+	var md mapstructure.Metadata
+	decoder, err := mapstructure.NewDecoder(
+		&mapstructure.DecoderConfig{
+			Metadata: &md,
+			Result:   result,
+		})
+	if err != nil {
+		return nil, err
+	}
+
+	// decode the unmarshalled map into the given struct
+	if err := decoder.Decode(foomap); err != nil {
+		return nil, err
+	}
+
+	// copy and return unused fields
+	unused := map[string]interface{}{}
+	for _, k := range md.Unused {
+		unused[k] = foomap[k]
+	}
+	return unused, nil
+}
+
 func jsonBytesToDestinationRule(dRuleBytes []byte) (*DestinationRule, error) {
 	var dRule DestinationRule
 	err := json.Unmarshal(dRuleBytes, &dRule)
+	if err != nil {
+		return nil, err
+	}
+	err = unMarshalSubsets(&dRule, dRuleBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -312,17 +436,20 @@ func (r *Reconciler) SetWeight(desiredWeight int32) error {
 	ctx := context.TODO()
 	var vsvc *unstructured.Unstructured
 	var err error
-	vsvcName := r.rollout.Spec.Strategy.Canary.TrafficRouting.Istio.VirtualService.Name
-	client := r.client.Resource(istioutil.GetIstioVirtualServiceGVR()).Namespace(r.rollout.Namespace)
+
+	namespace, vsvcName := istioutil.GetVirtualServiceNamespaceName(r.rollout.Spec.Strategy.Canary.TrafficRouting.Istio.VirtualService.Name)
+	if namespace == "" {
+		namespace = r.rollout.Namespace
+	}
+	client := r.client.Resource(istioutil.GetIstioVirtualServiceGVR()).Namespace(namespace)
 	if r.virtualServiceLister != nil {
-		vsvc, err = r.virtualServiceLister.Namespace(r.rollout.Namespace).Get(vsvcName)
+		vsvc, err = r.virtualServiceLister.Namespace(namespace).Get(vsvcName)
 	} else {
 		vsvc, err = client.Get(ctx, vsvcName, metav1.GetOptions{})
 	}
 	if err != nil {
 		if k8serrors.IsNotFound(err) {
-			msg := fmt.Sprintf("VirtualService `%s` not found", vsvcName)
-			r.recorder.Event(r.rollout, corev1.EventTypeWarning, "VirtualServiceNotFound", msg)
+			r.recorder.Warnf(r.rollout, record.EventOptions{EventReason: "VirtualServiceNotFound"}, "VirtualService `%s` not found", vsvcName)
 		}
 		return err
 	}
@@ -335,9 +462,8 @@ func (r *Reconciler) SetWeight(desiredWeight int32) error {
 	}
 	_, err = client.Update(ctx, modifiedVsvc, metav1.UpdateOptions{})
 	if err == nil {
-		msg := fmt.Sprintf("VirtualService `%s` set to desiredWeight '%d'", vsvcName, desiredWeight)
-		r.log.Info(msg)
-		r.recorder.Event(r.rollout, corev1.EventTypeNormal, "UpdatedVirtualService", msg)
+		r.log.Debugf("UpdatedVirtualService: %s", modifiedVsvc)
+		r.recorder.Eventf(r.rollout, record.EventOptions{EventReason: "UpdatedVirtualService"}, "VirtualService `%s` set to desiredWeight '%d'", vsvcName, desiredWeight)
 	}
 	return err
 }
@@ -346,34 +472,48 @@ func (r *Reconciler) VerifyWeight(desiredWeight int32) (bool, error) {
 	return true, nil
 }
 
-// validateHTTPRoutes ensures that all the routes in the rollout exist and they only have two destinations
-func ValidateHTTPRoutes(r *v1alpha1.Rollout, httpRoutes []VirtualServiceHTTPRoute) error {
-	routes := r.Spec.Strategy.Canary.TrafficRouting.Istio.VirtualService.Routes
-	stableSvc := r.Spec.Strategy.Canary.StableService
-	canarySvc := r.Spec.Strategy.Canary.CanaryService
-
-	routesPatched := map[string]bool{}
-	for _, route := range routes {
-		routesPatched[route] = false
-	}
-
-	for _, route := range httpRoutes {
-		// check if the httpRoute is in the list of routes from the rollout
-		if _, ok := routesPatched[route.Name]; ok {
-			routesPatched[route.Name] = true
-			err := validateVirtualServiceHTTPRouteDestinations(route, stableSvc, canarySvc, r.Spec.Strategy.Canary.TrafficRouting.Istio.DestinationRule)
-			if err != nil {
-				return err
+// getRouteIndexesToPatch returns array indices of the httpRoutes which need to be patched when updating weights
+func getRouteIndexesToPatch(routeNames []string, httpRoutes []VirtualServiceHTTPRoute) ([]int, error) {
+	var routeIndexesToPatch []int
+	if len(routeNames) == 0 {
+		if len(httpRoutes) != 1 {
+			return nil, fmt.Errorf("VirtualService spec.http[] must have exactly one route when omitting spec.strategy.canary.trafficRouting.istio.virtualService.routes")
+		}
+		routeIndexesToPatch = append(routeIndexesToPatch, 0)
+	} else {
+		for _, routeName := range routeNames {
+			foundRoute := false
+			for i, route := range httpRoutes {
+				if route.Name == routeName {
+					routeIndexesToPatch = append(routeIndexesToPatch, i)
+					foundRoute = true
+					break
+				}
+			}
+			if !foundRoute {
+				return nil, fmt.Errorf("Route '%s' is not found", routeName)
 			}
 		}
 	}
+	return routeIndexesToPatch, nil
+}
 
-	for i := range routesPatched {
-		if !routesPatched[i] {
-			return fmt.Errorf("Route '%s' is not found", i)
+// validateHTTPRoutes ensures that all the routes in the rollout exist and they only have two destinations
+func ValidateHTTPRoutes(r *v1alpha1.Rollout, httpRoutes []VirtualServiceHTTPRoute) error {
+	stableSvc := r.Spec.Strategy.Canary.StableService
+	canarySvc := r.Spec.Strategy.Canary.CanaryService
+
+	routeIndexesToPatch, err := getRouteIndexesToPatch(r.Spec.Strategy.Canary.TrafficRouting.Istio.VirtualService.Routes, httpRoutes)
+	if err != nil {
+		return err
+	}
+	for _, routeIndex := range routeIndexesToPatch {
+		route := httpRoutes[routeIndex]
+		err := validateVirtualServiceHTTPRouteDestinations(route, stableSvc, canarySvc, r.Spec.Strategy.Canary.TrafficRouting.Istio.DestinationRule)
+		if err != nil {
+			return err
 		}
 	}
-
 	return nil
 }
 
@@ -388,10 +528,18 @@ func validateVirtualServiceHTTPRouteDestinations(hr VirtualServiceHTTPRoute, sta
 	hasStableSubset := false
 	hasCanarySubset := false
 	for _, r := range hr.Route {
-		if stableSvc != "" && r.Destination.Host == stableSvc {
+		host := ""
+		if idx := strings.Index(r.Destination.Host, "."); idx > 0 {
+			host = r.Destination.Host[:idx]
+		} else if idx < 0 {
+			host = r.Destination.Host
+		}
+
+		if stableSvc != "" && host == stableSvc {
 			hasStableSvc = true
 		}
-		if canarySvc != "" && r.Destination.Host == canarySvc {
+
+		if canarySvc != "" && host == canarySvc {
 			hasCanarySvc = true
 		}
 		if dRule != nil {

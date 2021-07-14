@@ -1,6 +1,7 @@
 package fixtures
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -8,12 +9,15 @@ import (
 	"strconv"
 	"time"
 
+	"k8s.io/cli-runtime/pkg/genericclioptions"
+
 	"github.com/ghodss/yaml"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"k8s.io/apimachinery/pkg/watch"
@@ -21,17 +25,21 @@ import (
 	watchutil "k8s.io/client-go/tools/watch"
 	retryutil "k8s.io/client-go/util/retry"
 
+	"github.com/argoproj/argo-rollouts/pkg/apiclient/rollout"
 	rov1 "github.com/argoproj/argo-rollouts/pkg/apis/rollouts/v1alpha1"
 	"github.com/argoproj/argo-rollouts/pkg/kubectl-argo-rollouts/cmd/abort"
 	"github.com/argoproj/argo-rollouts/pkg/kubectl-argo-rollouts/cmd/promote"
 	"github.com/argoproj/argo-rollouts/pkg/kubectl-argo-rollouts/cmd/restart"
 	"github.com/argoproj/argo-rollouts/pkg/kubectl-argo-rollouts/cmd/retry"
-	"github.com/argoproj/argo-rollouts/pkg/kubectl-argo-rollouts/info"
+	"github.com/argoproj/argo-rollouts/pkg/kubectl-argo-rollouts/cmd/status"
+	"github.com/argoproj/argo-rollouts/pkg/kubectl-argo-rollouts/options"
+	"github.com/argoproj/argo-rollouts/pkg/kubectl-argo-rollouts/viewcontroller"
+	rolloututil "github.com/argoproj/argo-rollouts/utils/rollout"
 	unstructuredutil "github.com/argoproj/argo-rollouts/utils/unstructured"
 )
 
 type When struct {
-	Common
+	*Common
 }
 
 func (w *When) ApplyManifests(yaml ...string) *When {
@@ -105,7 +113,7 @@ func (w *When) UpdateSpec(texts ...string) *When {
 	}
 	var patchBytes []byte
 	if len(texts) == 0 {
-		nowStr := time.Now().Format(time.RFC3339)
+		nowStr := time.Now().Format(time.RFC3339Nano)
 		patchBytes = []byte(fmt.Sprintf(`{"spec":{"template":{"metadata":{"annotations":{"update":"%s"}}}}}`, nowStr))
 		w.log.Infof("Updated rollout pod spec: %s", nowStr)
 	} else {
@@ -185,6 +193,21 @@ func (w *When) Sleep(d time.Duration) *When {
 	return w
 }
 
+// UpdateResource modifies the specified resource
+func (w *When) UpdateResource(gvr schema.GroupVersionResource, name string, update func(res *unstructured.Unstructured) error) *When {
+	err := retryutil.RetryOnConflict(retryutil.DefaultRetry, func() error {
+		client := w.dynamicClient.Resource(gvr).Namespace(w.namespace)
+		res, err := client.Get(w.Context, name, metav1.GetOptions{})
+		w.CheckError(err)
+		err = update(res)
+		w.CheckError(err)
+		_, err = client.Update(w.Context, res, metav1.UpdateOptions{})
+		return err
+	})
+	w.CheckError(err)
+	return w
+}
+
 // PatchSpec patches the rollout
 func (w *When) PatchSpec(patch string) *When {
 	if w.rollout == nil {
@@ -218,14 +241,57 @@ func (w *When) PatchSpec(patch string) *When {
 
 func (w *When) WaitForRolloutStatus(status string, timeout ...time.Duration) *When {
 	checkStatus := func(ro *rov1.Rollout) bool {
-		s, _ := info.RolloutStatusString(ro)
-		return s == status
+		s, _ := rolloututil.GetRolloutPhase(ro)
+		return string(s) == status
 	}
 	return w.WaitForRolloutCondition(checkStatus, fmt.Sprintf("status=%s", status), timeout...)
 }
 
 func (w *When) Wait(duration time.Duration) *When {
 	time.Sleep(duration)
+	return w
+}
+
+// WatchRolloutStatus returns success if Rollout becomes Healthy within timeout period
+// Returns error is Rollout becomes Degraded or times out
+func (w *When) WatchRolloutStatus(expectedStatus string, timeouts ...time.Duration) *When {
+	timeout := E2EWaitTimeout
+	if len(timeouts) > 0 {
+		timeout = timeouts[0]
+	}
+
+	iostreams, _, _, _ := genericclioptions.NewTestIOStreams()
+	statusOptions := status.StatusOptions{
+		Watch:   true,
+		Timeout: timeout,
+		ArgoRolloutsOptions: options.ArgoRolloutsOptions{
+			RolloutsClient: w.rolloutClient,
+			KubeClient:     w.kubeClient,
+			Log:            w.log.Logger,
+			IOStreams:      iostreams,
+		},
+	}
+
+	controller := viewcontroller.NewRolloutViewController(w.namespace, w.rollout.GetName(), w.kubeClient, w.rolloutClient)
+	ctx, cancel := context.WithCancel(w.Context)
+	defer cancel()
+	controller.Start(ctx)
+
+	rolloutUpdates := make(chan *rollout.RolloutInfo)
+	defer close(rolloutUpdates)
+	controller.RegisterCallback(func(roInfo *rollout.RolloutInfo) {
+		rolloutUpdates <- roInfo
+	})
+
+	go controller.Run(ctx)
+	finalStatus := statusOptions.WatchStatus(ctx.Done(), rolloutUpdates)
+
+	if finalStatus == expectedStatus {
+		w.log.Infof("expected status %s", finalStatus)
+	} else {
+		w.t.Fatalf("unexpected status %s", finalStatus)
+	}
+
 	return w
 }
 
@@ -243,7 +309,7 @@ func (w *When) WaitForRolloutCanaryStepIndex(index int32, timeout ...time.Durati
 			//      WaitForRolloutCanaryStepIndex(N).
 			//      WaitForRolloutStatus("Paused").
 			// which would be annoying.
-			status, _ := info.RolloutStatusString(ro)
+			status, _ := rolloututil.GetRolloutPhase(ro)
 			return status == "Paused"
 		}
 		return true

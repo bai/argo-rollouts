@@ -1,4 +1,4 @@
-@import '../../shared/styles/colors.scss';
+@import 'node_modules/argo-ux/styles/colors';
 
 .rollouts-header {
     display: flex;
@@ -59,8 +59,15 @@
         display: flex;
         align-items: center;
     }
-    &__version {
+    &__label {
         color: $shine;
         margin: 0 15px;
+        margin: auto;
+        padding: 5px;
+    }
+    &__namespace {
+        color: black;
+        display: flex;
+        position: relative;
     }
 }

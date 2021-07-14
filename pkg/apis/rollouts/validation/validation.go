@@ -50,8 +50,6 @@ const (
 	ScaleDownLimitLargerThanRevisionLimit = "This rollout's revision history limit can not be smaller than the rollout's scale down limit"
 	// InvalidTrafficRoutingMessage indicates that both canary and stable service must be set to use Traffic Routing
 	InvalidTrafficRoutingMessage = "Canary service and Stable service must to be set to use Traffic Routing"
-	// InvalidIstioRoutesMessage indicates that rollout does not have a route specified for the istio Traffic Routing
-	InvalidIstioRoutesMessage = "Istio virtual service must have at least 1 route specified"
 	// InvalidAnalysisArgsMessage indicates that arguments provided in analysis steps are refrencing un-supported metadatafield.
 	//supported fields are "metadata.annotations", "metadata.labels", "metadata.name", "metadata.namespace", "metadata.uid"
 	InvalidAnalysisArgsMessage = "Analyses arguments must refer to valid object metadata supported by downwardAPI"
@@ -73,14 +71,23 @@ func ValidateRolloutSpec(rollout *v1alpha1.Rollout, fldPath *field.Path) field.E
 	replicas := defaults.GetReplicasOrDefault(spec.Replicas)
 	allErrs = append(allErrs, apivalidation.ValidateNonnegativeField(int64(replicas), fldPath.Child("replicas"))...)
 
-	if spec.Selector == nil {
-		message := fmt.Sprintf(MissingFieldMessage, ".spec.selector")
-		allErrs = append(allErrs, field.Required(fldPath.Child("selector"), message))
-	} else {
-		allErrs = append(allErrs, unversionedvalidation.ValidateLabelSelector(spec.Selector, fldPath.Child("selector"))...)
-		if len(spec.Selector.MatchLabels)+len(spec.Selector.MatchExpressions) == 0 {
-			allErrs = append(allErrs, field.Invalid(fldPath.Child("selector"), spec.Selector, "empty selector is invalid for deployment"))
+	if spec.WorkloadRef == nil {
+		if spec.Selector == nil {
+			message := fmt.Sprintf(MissingFieldMessage, ".spec.selector")
+			allErrs = append(allErrs, field.Required(fldPath.Child("selector"), message))
+		} else {
+			allErrs = append(allErrs, unversionedvalidation.ValidateLabelSelector(spec.Selector, fldPath.Child("selector"))...)
+			if len(spec.Selector.MatchLabels)+len(spec.Selector.MatchExpressions) == 0 {
+				allErrs = append(allErrs, field.Invalid(fldPath.Child("selector"), spec.Selector, "empty selector is invalid for deployment"))
+			}
 		}
+	}
+
+	if !rollout.Spec.TemplateResolvedFromRef && (spec.WorkloadRef != nil && !spec.EmptyTemplate()) {
+		// WorkloadRef and template can not be set at the same time for lint plugin
+		// During reconciliation, TemplateResolvedFromRef is true and will not reach here
+		allErrs = append(allErrs, field.InternalError(fldPath.Child("template"),
+			fmt.Errorf("template must be empty for workload reference rollout")))
 	}
 
 	selector, err := metav1.LabelSelectorAsSelector(spec.Selector)
@@ -114,9 +121,12 @@ func ValidateRolloutSpec(rollout *v1alpha1.Rollout, fldPath *field.Path) field.E
 			AllowMultipleHugePageResources: true,
 			AllowDownwardAPIHugePages:      true,
 		}
-		allErrs = append(allErrs, validation.ValidatePodTemplateSpecForReplicaSet(&template, selector, replicas, fldPath.Child("template"), opts)...)
-	}
 
+		// Skip validating empty template for rollout resolved from ref
+		if rollout.Spec.TemplateResolvedFromRef || spec.WorkloadRef == nil {
+			allErrs = append(allErrs, validation.ValidatePodTemplateSpecForReplicaSet(&template, selector, replicas, fldPath.Child("template"), opts)...)
+		}
+	}
 	allErrs = append(allErrs, apivalidation.ValidateNonnegativeField(int64(spec.MinReadySeconds), fldPath.Child("minReadySeconds"))...)
 
 	revisionHistoryLimit := defaults.GetRevisionHistoryLimitOrDefault(rollout)
@@ -205,9 +215,6 @@ func ValidateRolloutStrategyCanary(rollout *v1alpha1.Rollout, fldPath *field.Pat
 		if canary.CanaryService == "" {
 			allErrs = append(allErrs, field.Invalid(fldPath.Child("canaryService"), canary.CanaryService, InvalidTrafficRoutingMessage))
 		}
-	}
-	if canary.TrafficRouting != nil && canary.TrafficRouting.Istio != nil && len(canary.TrafficRouting.Istio.VirtualService.Routes) == 0 {
-		allErrs = append(allErrs, field.Invalid(fldPath.Child("trafficRouting").Child("istio").Child("virtualService").Child("routes"), "[]", InvalidIstioRoutesMessage))
 	}
 
 	if canary.ScaleDownDelaySeconds != nil && canary.TrafficRouting == nil {

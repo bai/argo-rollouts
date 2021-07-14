@@ -56,6 +56,17 @@ rules:
   - update
   - patch
   - delete
+  # deployments and podtemplates read access needed for workload reference support
+- apiGroups:
+    - ""
+    - apps
+  resources:
+    - deployments
+    - podtemplates
+  verbs:
+    - get
+    - list
+    - watch
 # services patch needed to update selector of canary/stable/active/preview services
 - apiGroups:
   - ""
@@ -71,6 +82,7 @@ rules:
   - ""
   resources:
   - secrets
+  - configmaps
   verbs:
   - get
   - list
@@ -151,6 +163,17 @@ rules:
   - getambassador.io
   resources:
   - mappings
+  verbs:
+  - create
+  - watch
+  - get
+  - update
+  - list
+  - delete
+- apiGroups:
+  - x.getambassador.io
+  resources:
+  - ambassadormappings
   verbs:
   - create
   - watch

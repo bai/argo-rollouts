@@ -10214,7 +10214,6 @@ spec:
                                     type: array
                                 required:
                                 - name
-                                - routes
                                 type: object
                             required:
                             - virtualService
@@ -12350,9 +12349,15 @@ spec:
                     - containers
                     type: object
                 type: object
-            required:
-            - selector
-            - template
+              workloadRef:
+                properties:
+                  apiVersion:
+                    type: string
+                  kind:
+                    type: string
+                  name:
+                    type: string
+                type: object
             type: object
           status:
             properties:
@@ -12467,6 +12472,8 @@ spec:
               currentStepIndex:
                 format: int32
                 type: integer
+              message:
+                type: string
               observedGeneration:
                 type: string
               pauseConditions:
@@ -12482,6 +12489,8 @@ spec:
                   - startTime
                   type: object
                 type: array
+              phase:
+                type: string
               promoteFull:
                 type: boolean
               readyReplicas:
@@ -12500,6 +12509,8 @@ spec:
               updatedReplicas:
                 format: int32
                 type: integer
+              workloadObservedGeneration:
+                type: string
             type: object
         required:
         - spec
@@ -12665,6 +12676,16 @@ rules:
   - delete
 - apiGroups:
   - ""
+  - apps
+  resources:
+  - deployments
+  - podtemplates
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
   resources:
   - services
   verbs:
@@ -12676,6 +12697,7 @@ rules:
   - ""
   resources:
   - secrets
+  - configmaps
   verbs:
   - get
   - list
@@ -12756,6 +12778,17 @@ rules:
   - update
   - list
   - delete
+- apiGroups:
+  - x.getambassador.io
+  resources:
+  - ambassadormappings
+  verbs:
+  - create
+  - watch
+  - get
+  - update
+  - list
+  - delete
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -12813,10 +12846,27 @@ spec:
       containers:
       - image: quay.io/argoproj/argo-rollouts:latest
         imagePullPolicy: Always
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /metrics
+            port: 8090
+          initialDelaySeconds: 30
+          periodSeconds: 20
+          successThreshold: 1
+          timeoutSeconds: 10
         name: argo-rollouts
         ports:
         - containerPort: 8090
           name: metrics
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /metrics
+            port: 8090
+          periodSeconds: 5
+          successThreshold: 1
+          timeoutSeconds: 4
       securityContext:
         runAsNonRoot: true
       serviceAccountName: argo-rollouts

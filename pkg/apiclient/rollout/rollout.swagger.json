@@ -823,7 +823,7 @@
           "items": {
             "type": "string"
           },
-          "title": "Routes list of routes within VirtualService to edit"
+          "title": "Routes are list of routes within VirtualService to edit. If omitted, VirtualService must have a single route"
         }
       },
       "title": "IstioVirtualService holds information on the virtual service the rollout needs to modify"
@@ -848,6 +848,24 @@
         }
       },
       "title": "NginxTrafficRouting configuration for Nginx ingress controller to control traffic routing"
+    },
+    "github.com.argoproj.argo_rollouts.pkg.apis.rollouts.v1alpha1.ObjectRef": {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "type": "string",
+          "title": "API Version of the referent"
+        },
+        "kind": {
+          "type": "string",
+          "title": "Kind of the referent"
+        },
+        "name": {
+          "type": "string",
+          "title": "Name of the referent"
+        }
+      },
+      "title": "ObjectRef holds a references to the Kubernetes object"
     },
     "github.com.argoproj.argo_rollouts.pkg.apis.rollouts.v1alpha1.PauseCondition": {
       "type": "object",
@@ -1101,11 +1119,15 @@
         },
         "selector": {
           "$ref": "#/definitions/k8s.io.apimachinery.pkg.apis.meta.v1.LabelSelector",
-          "description": "Label selector for pods. Existing ReplicaSets whose pods are\nselected by this will be the ones affected by this rollout.\nIt must match the pod template's labels."
+          "title": "Label selector for pods. Existing ReplicaSets whose pods are\nselected by this will be the ones affected by this rollout.\nIt must match the pod template's labels.\n+optional"
         },
         "template": {
           "$ref": "#/definitions/k8s.io.api.core.v1.PodTemplateSpec",
-          "description": "Template describes the pods that will be created."
+          "title": "Template describes the pods that will be created.\n+optional"
+        },
+        "workloadRef": {
+          "$ref": "#/definitions/github.com.argoproj.argo_rollouts.pkg.apis.rollouts.v1alpha1.ObjectRef",
+          "title": "WorkloadRef holds a references to a workload that provides Pod template\n+optional"
         },
         "minReadySeconds": {
           "type": "integer",
@@ -1199,7 +1221,11 @@
         },
         "observedGeneration": {
           "type": "string",
-          "title": "The generation observed by the rollout controller by taking a hash of the spec.\n+optional"
+          "title": "The generation observed by the rollout controller from metadata.generation\n+optional"
+        },
+        "workloadObservedGeneration": {
+          "type": "string",
+          "title": "The generation of referenced workload observed by the rollout controller\n+optional"
         },
         "conditions": {
           "type": "array",
@@ -1236,6 +1262,14 @@
         "promoteFull": {
           "type": "boolean",
           "description": "PromoteFull indicates if the rollout should perform a full promotion, skipping analysis and pauses."
+        },
+        "phase": {
+          "type": "string",
+          "title": "Phase is the rollout phase. Clients should only rely on the value if status.observedGeneration equals metadata.generation"
+        },
+        "message": {
+          "type": "string",
+          "title": "Message provides details on why the rollout is in its current phase"
         }
       },
       "title": "RolloutStatus is the status for a Rollout resource"
@@ -4100,6 +4134,12 @@
       "properties": {
         "namespace": {
           "type": "string"
+        },
+        "availableNamespaces": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       }
     },
@@ -4132,6 +4172,9 @@
         },
         "namespace": {
           "type": "string"
+        },
+        "full": {
+          "type": "boolean"
         }
       }
     },

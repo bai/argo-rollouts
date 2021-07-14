@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/argoproj/argo-rollouts/utils/queue"
 
 	"github.com/ghodss/yaml"
 	log "github.com/sirupsen/logrus"
@@ -47,6 +50,9 @@ import (
 	"github.com/argoproj/argo-rollouts/utils/conditions"
 	"github.com/argoproj/argo-rollouts/utils/defaults"
 	istioutil "github.com/argoproj/argo-rollouts/utils/istio"
+	"github.com/argoproj/argo-rollouts/utils/record"
+	replicasetutil "github.com/argoproj/argo-rollouts/utils/replicaset"
+	rolloututil "github.com/argoproj/argo-rollouts/utils/rollout"
 )
 
 var (
@@ -61,20 +67,15 @@ const (
 	}`
 )
 
-type FakeEventRecorder struct {
-	Events chan string
+type FakeWorkloadRefResolver struct {
 }
 
-func (f *FakeEventRecorder) Event(object runtime.Object, eventtype, reason, message string) {
-	log.Infof("%s %s %s", eventtype, reason, message)
+func (f *FakeWorkloadRefResolver) Resolve(_ *v1alpha1.Rollout) error {
+	return nil
 }
 
-func (f *FakeEventRecorder) Eventf(object runtime.Object, eventtype, reason, messageFmt string, args ...interface{}) {
-	log.Infof(eventtype+" "+reason+" "+messageFmt, args...)
-}
-
-func (f *FakeEventRecorder) AnnotatedEventf(object runtime.Object, annotations map[string]string, eventtype, reason, messageFmt string, args ...interface{}) {
-	f.Eventf(object, eventtype, reason, messageFmt, args...)
+func (f *FakeWorkloadRefResolver) Init() error {
+	return nil
 }
 
 type fixture struct {
@@ -173,8 +174,8 @@ func newPausedCondition(isPaused bool) (v1alpha1.RolloutCondition, string) {
 	condition := v1alpha1.RolloutCondition{
 		LastTransitionTime: metav1.Now(),
 		LastUpdateTime:     metav1.Now(),
-		Message:            conditions.PausedRolloutMessage,
-		Reason:             conditions.PausedRolloutReason,
+		Message:            conditions.RolloutPausedMessage,
+		Reason:             conditions.RolloutPausedReason,
 		Status:             status,
 		Type:               v1alpha1.RolloutPaused,
 	}
@@ -227,7 +228,8 @@ func newProgressingCondition(reason string, resourceObj runtime.Object, optional
 			msg = fmt.Sprintf(conditions.RolloutProgressingMessage, resource.Name)
 		}
 		if reason == conditions.RolloutAbortedReason {
-			msg = conditions.RolloutAbortedMessage
+			rev, _ := replicasetutil.Revision(resourceObj)
+			msg = fmt.Sprintf(conditions.RolloutAbortedMessage, rev)
 			status = corev1.ConditionFalse
 		}
 		if reason == conditions.RolloutExperimentFailedReason {
@@ -259,12 +261,12 @@ func newProgressingCondition(reason string, resourceObj runtime.Object, optional
 		}
 	}
 
-	if reason == conditions.PausedRolloutReason {
-		msg = conditions.PausedRolloutMessage
+	if reason == conditions.RolloutPausedReason {
+		msg = conditions.RolloutPausedMessage
 		status = corev1.ConditionUnknown
 	}
-	if reason == conditions.ResumedRolloutReason {
-		msg = conditions.ResumeRolloutMessage
+	if reason == conditions.RolloutResumedReason {
+		msg = conditions.RolloutResumedMessage
 		status = corev1.ConditionUnknown
 	}
 
@@ -337,6 +339,12 @@ func generateConditionsPatchWithComplete(available bool, progressingReason strin
 	return fmt.Sprintf("[%s, %s, %s]", completeCondition, progressingCondition, availableCondition)
 }
 
+func updateConditionsPatch(r v1alpha1.Rollout, newCondition v1alpha1.RolloutCondition) string {
+	conditions.SetRolloutCondition(&r.Status, newCondition)
+	conditionsBytes, _ := json.Marshal(r.Status.Conditions)
+	return string(conditionsBytes)
+}
+
 // func updateBlueGreenRolloutStatus(r *v1alpha1.Rollout, preview, active string, availableReplicas, updatedReplicas, hpaReplicas int32, pause bool, available bool, progressingStatus string) *v1alpha1.Rollout {
 func updateBlueGreenRolloutStatus(r *v1alpha1.Rollout, preview, active, stable string, availableReplicas, updatedReplicas, totalReplicas, hpaReplicas int32, pause bool, available bool) *v1alpha1.Rollout {
 	newRollout := updateBaseRolloutStatus(r, availableReplicas, updatedReplicas, totalReplicas, hpaReplicas)
@@ -359,6 +367,7 @@ func updateBlueGreenRolloutStatus(r *v1alpha1.Rollout, preview, active, stable s
 		newRollout.Status.ControllerPause = true
 		newRollout.Status.PauseConditions = append(newRollout.Status.PauseConditions, cond)
 	}
+	newRollout.Status.Phase, newRollout.Status.Message = rolloututil.CalculateRolloutPhase(r.Spec, newRollout.Status)
 	return newRollout
 }
 func updateCanaryRolloutStatus(r *v1alpha1.Rollout, stableRS string, availableReplicas, updatedReplicas, hpaReplicas int32, pause bool) *v1alpha1.Rollout {
@@ -373,6 +382,7 @@ func updateCanaryRolloutStatus(r *v1alpha1.Rollout, stableRS string, availableRe
 		newRollout.Status.ControllerPause = true
 		newRollout.Status.PauseConditions = append(newRollout.Status.PauseConditions, cond)
 	}
+	newRollout.Status.Phase, newRollout.Status.Message = rolloututil.CalculateRolloutPhase(r.Spec, newRollout.Status)
 	return newRollout
 }
 
@@ -479,9 +489,9 @@ func (f *fixture) newController(resync resyncFunc) (*Controller, informers.Share
 	istioVirtualServiceInformer := dynamicInformerFactory.ForResource(istioutil.GetIstioVirtualServiceGVR()).Informer()
 	istioDestinationRuleInformer := dynamicInformerFactory.ForResource(istioutil.GetIstioDestinationRuleGVR()).Informer()
 
-	rolloutWorkqueue := workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "Rollouts")
-	serviceWorkqueue := workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "Services")
-	ingressWorkqueue := workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "Ingresses")
+	rolloutWorkqueue := workqueue.NewNamedRateLimitingQueue(workqueue.NewItemExponentialFailureRateLimiter(time.Millisecond, 10*time.Second), "Rollouts")
+	serviceWorkqueue := workqueue.NewNamedRateLimitingQueue(queue.DefaultArgoRolloutsRateLimiter(), "Services")
+	ingressWorkqueue := workqueue.NewNamedRateLimitingQueue(queue.DefaultArgoRolloutsRateLimiter(), "Ingresses")
 
 	metricsServer := metrics.NewMetricsServer(metrics.ServerConfig{
 		Addr:               "localhost:8080",
@@ -501,6 +511,7 @@ func (f *fixture) newController(resync resyncFunc) (*Controller, informers.Share
 		ServicesInformer:                k8sI.Core().V1().Services(),
 		IngressInformer:                 k8sI.Extensions().V1beta1().Ingresses(),
 		RolloutsInformer:                i.Argoproj().V1alpha1().Rollouts(),
+		IstioPrimaryDynamicClient:       dynamicClient,
 		IstioVirtualServiceInformer:     istioVirtualServiceInformer,
 		IstioDestinationRuleInformer:    istioDestinationRuleInformer,
 		ResyncPeriod:                    resync(),
@@ -508,7 +519,8 @@ func (f *fixture) newController(resync resyncFunc) (*Controller, informers.Share
 		ServiceWorkQueue:                serviceWorkqueue,
 		IngressWorkQueue:                ingressWorkqueue,
 		MetricsServer:                   metricsServer,
-		Recorder:                        &FakeEventRecorder{},
+		Recorder:                        record.NewFakeEventRecorder(),
+		RefResolver:                     &FakeWorkloadRefResolver{},
 	})
 
 	var enqueuedObjectsLock sync.Mutex
@@ -954,6 +966,25 @@ func (f *fixture) getPatchedRollout(index int) string {
 	return string(patchAction.GetPatch())
 }
 
+func (f *fixture) getPatchedRolloutWithoutConditions(index int) string {
+	action := filterInformerActions(f.client.Actions())[index]
+	patchAction, ok := action.(core.PatchAction)
+	if !ok {
+		f.t.Fatalf("Expected Patch action, not %s", action.GetVerb())
+	}
+	ro := make(map[string]interface{})
+	err := json.Unmarshal(patchAction.GetPatch(), &ro)
+	if err != nil {
+		f.t.Fatalf("Unable to unmarshal Patch")
+	}
+	unstructured.RemoveNestedField(ro, "status", "conditions")
+	roBytes, err := json.Marshal(ro)
+	if err != nil {
+		f.t.Fatalf("Unable to marshal Patch")
+	}
+	return string(roBytes)
+}
+
 func (f *fixture) getPatchedRolloutAsObject(index int) *v1alpha1.Rollout {
 	action := filterInformerActions(f.client.Actions())[index]
 	patchAction, ok := action.(core.PatchAction)
@@ -1173,6 +1204,7 @@ func TestSetReplicaToDefault(t *testing.T) {
 	assert.Equal(t, defaults.DefaultReplicas, *updatedRollout.Spec.Replicas)
 }
 
+// TestSwitchInvalidSpecMessage verifies message is updated when reason for InvalidSpec changes
 func TestSwitchInvalidSpecMessage(t *testing.T) {
 	f := newFixture(t)
 	defer f.Close()
@@ -1181,6 +1213,7 @@ func TestSwitchInvalidSpecMessage(t *testing.T) {
 	r.Spec.Selector = &metav1.LabelSelector{}
 	cond := conditions.NewRolloutCondition(v1alpha1.InvalidSpec, corev1.ConditionTrue, conditions.InvalidSpecReason, conditions.RolloutSelectAllMessage)
 	conditions.SetRolloutCondition(&r.Status, *cond)
+	r.Status.Phase, r.Status.Message = rolloututil.CalculateRolloutPhase(r.Spec, r.Status)
 
 	r.Spec.Selector = nil
 	f.rolloutLister = append(f.rolloutLister, r)
@@ -1191,13 +1224,15 @@ func TestSwitchInvalidSpecMessage(t *testing.T) {
 
 	expectedPatchWithoutSub := `{
 		"status": {
-			"conditions": [%s,%s]
+			"conditions": [%s,%s],
+			"message": "%s: %s"
 		}
 	}`
+	errmsg := "The Rollout \"foo\" is invalid: spec.selector: Required value: Rollout has missing field '.spec.selector'"
 	_, progressingCond := newProgressingCondition(conditions.ReplicaSetUpdatedReason, r, "")
-	invalidSpecCond := conditions.NewRolloutCondition(v1alpha1.InvalidSpec, corev1.ConditionTrue, conditions.InvalidSpecReason, "The Rollout \"foo\" is invalid: spec.selector: Required value: Rollout has missing field '.spec.selector'")
+	invalidSpecCond := conditions.NewRolloutCondition(v1alpha1.InvalidSpec, corev1.ConditionTrue, conditions.InvalidSpecReason, errmsg)
 	invalidSpecBytes, _ := json.Marshal(invalidSpecCond)
-	expectedPatch := fmt.Sprintf(expectedPatchWithoutSub, progressingCond, string(invalidSpecBytes))
+	expectedPatch := fmt.Sprintf(expectedPatchWithoutSub, progressingCond, string(invalidSpecBytes), conditions.InvalidSpecReason, strings.ReplaceAll(errmsg, "\"", "\\\""))
 
 	patch := f.getPatchedRollout(patchIndex)
 	assert.Equal(t, calculatePatch(r, expectedPatch), patch)
@@ -1298,6 +1333,7 @@ func TestComputeHashChangeTolerationBlueGreen(t *testing.T) {
 	conditions.SetRolloutCondition(&r.Status, availableCondition)
 	progressingCondition, _ := newProgressingCondition(conditions.ReplicaSetUpdatedReason, rs, "")
 	conditions.SetRolloutCondition(&r.Status, progressingCondition)
+	r.Status.Phase, r.Status.Message = rolloututil.CalculateRolloutPhase(r.Spec, r.Status)
 
 	podTemplate := corev1.PodTemplate{
 		Template: rs.Spec.Template,
@@ -1423,22 +1459,87 @@ func newInvalidSpecCondition(reason string, resourceObj runtime.Object, optional
 	return condition, string(conditionBytes)
 }
 
+func TestGetReferencedAnalyses(t *testing.T) {
+	f := newFixture(t)
+	defer f.Close()
+
+	rolloutAnalysisFail := v1alpha1.RolloutAnalysis{
+		Templates: []v1alpha1.RolloutAnalysisTemplate{{
+			TemplateName: "does-not-exist",
+			ClusterScope: false,
+		}},
+	}
+
+	t.Run("blueGreen pre-promotion analysis - fail", func(t *testing.T) {
+		r := newBlueGreenRollout("rollout", 1, nil, "active-service", "preview-service")
+		r.Spec.Strategy.BlueGreen.PrePromotionAnalysis = &rolloutAnalysisFail
+		c, _, _ := f.newController(noResyncPeriodFunc)
+		roCtx, err := c.newRolloutContext(r)
+		assert.NoError(t, err)
+		_, err = roCtx.getReferencedRolloutAnalyses()
+		assert.NotNil(t, err)
+		msg := "spec.strategy.blueGreen.prePromotionAnalysis.templates: Invalid value: \"does-not-exist\": AnalysisTemplate 'does-not-exist' not found"
+		assert.Equal(t, msg, err.Error())
+	})
+
+	t.Run("blueGreen post-promotion analysis - fail", func(t *testing.T) {
+		r := newBlueGreenRollout("rollout", 1, nil, "active-service", "preview-service")
+		r.Spec.Strategy.BlueGreen.PostPromotionAnalysis = &rolloutAnalysisFail
+		c, _, _ := f.newController(noResyncPeriodFunc)
+		roCtx, err := c.newRolloutContext(r)
+		assert.NoError(t, err)
+		_, err = roCtx.getReferencedRolloutAnalyses()
+		assert.NotNil(t, err)
+		msg := "spec.strategy.blueGreen.postPromotionAnalysis.templates: Invalid value: \"does-not-exist\": AnalysisTemplate 'does-not-exist' not found"
+		assert.Equal(t, msg, err.Error())
+	})
+
+	t.Run("canary analysis - fail", func(t *testing.T) {
+		r := newCanaryRollout("rollout-canary", 1, nil, nil, int32Ptr(0), intstr.FromInt(0), intstr.FromInt(1))
+		r.Spec.Strategy.Canary.Analysis = &v1alpha1.RolloutAnalysisBackground{
+			RolloutAnalysis: rolloutAnalysisFail,
+		}
+		c, _, _ := f.newController(noResyncPeriodFunc)
+		roCtx, err := c.newRolloutContext(r)
+		assert.NoError(t, err)
+		_, err = roCtx.getReferencedRolloutAnalyses()
+		assert.NotNil(t, err)
+		msg := "spec.strategy.canary.analysis.templates: Invalid value: \"does-not-exist\": AnalysisTemplate 'does-not-exist' not found"
+		assert.Equal(t, msg, err.Error())
+	})
+
+	t.Run("canary step analysis - fail", func(t *testing.T) {
+		canarySteps := []v1alpha1.CanaryStep{{
+			Analysis: &rolloutAnalysisFail,
+		}}
+		r := newCanaryRollout("rollout-canary", 1, nil, canarySteps, int32Ptr(0), intstr.FromInt(0), intstr.FromInt(1))
+		c, _, _ := f.newController(noResyncPeriodFunc)
+		roCtx, err := c.newRolloutContext(r)
+		assert.NoError(t, err)
+		_, err = roCtx.getReferencedRolloutAnalyses()
+		assert.NotNil(t, err)
+		msg := "spec.strategy.canary.steps[0].analysis.templates: Invalid value: \"does-not-exist\": AnalysisTemplate 'does-not-exist' not found"
+		assert.Equal(t, msg, err.Error())
+	})
+}
+
 func TestGetReferencedAnalysisTemplate(t *testing.T) {
 	f := newFixture(t)
 	defer f.Close()
 	r := newBlueGreenRollout("rollout", 1, nil, "active-service", "preview-service")
-	roAnalysisTemplate := v1alpha1.RolloutAnalysisTemplate{
-		TemplateName: "cluster-analysis-template-name",
-		ClusterScope: true,
+	roAnalysisTemplate := &v1alpha1.RolloutAnalysis{
+		Templates: []v1alpha1.RolloutAnalysisTemplate{{
+			TemplateName: "cluster-analysis-template-name",
+			ClusterScope: true,
+		}},
 	}
-	defer f.Close()
 
 	t.Run("get referenced analysisTemplate - fail", func(t *testing.T) {
 		c, _, _ := f.newController(noResyncPeriodFunc)
 		roCtx, err := c.newRolloutContext(r)
 		assert.NoError(t, err)
-		_, err = roCtx.getReferencedAnalysisTemplate(roAnalysisTemplate, validation.PrePromotionAnalysis, 0, 0)
-		expectedErr := field.Invalid(validation.GetAnalysisTemplateWithTypeFieldPath(validation.PrePromotionAnalysis, 0, 0), roAnalysisTemplate.TemplateName, "clusteranalysistemplate.argoproj.io \"cluster-analysis-template-name\" not found")
+		_, err = roCtx.getReferencedAnalysisTemplates(r, roAnalysisTemplate, validation.PrePromotionAnalysis, 0)
+		expectedErr := field.Invalid(validation.GetAnalysisTemplateWithTypeFieldPath(validation.PrePromotionAnalysis, 0), roAnalysisTemplate.Templates[0].TemplateName, "ClusterAnalysisTemplate 'cluster-analysis-template-name' not found")
 		assert.Equal(t, expectedErr.Error(), err.Error())
 	})
 
@@ -1447,7 +1548,7 @@ func TestGetReferencedAnalysisTemplate(t *testing.T) {
 		c, _, _ := f.newController(noResyncPeriodFunc)
 		roCtx, err := c.newRolloutContext(r)
 		assert.NoError(t, err)
-		_, err = roCtx.getReferencedAnalysisTemplate(roAnalysisTemplate, validation.PrePromotionAnalysis, 0, 0)
+		_, err = roCtx.getReferencedAnalysisTemplates(r, roAnalysisTemplate, validation.PrePromotionAnalysis, 0)
 		assert.NoError(t, err)
 	})
 }

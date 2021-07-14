@@ -31,7 +31,8 @@ const (
 )
 
 const (
-	DefaultAmbassadorVersion      = "v2"
+	DefaultAmbassadorAPIGroup     = "getambassador.io"
+	DefaultAmbassadorVersion      = "getambassador.io/v2"
 	DefaultIstioVersion           = "v1alpha3"
 	DefaultSMITrafficSplitVersion = "v1alpha1"
 )
@@ -76,15 +77,6 @@ func GetCanaryIngressAnnotationPrefixOrDefault(rollout *v1alpha1.Rollout) string
 		return rollout.Spec.Strategy.Canary.TrafficRouting.Nginx.AnnotationPrefix
 	}
 	return "nginx.ingress.kubernetes.io"
-}
-func GetStrategyType(rollout *v1alpha1.Rollout) string {
-	if rollout.Spec.Strategy.BlueGreen != nil {
-		return "blueGreen"
-	}
-	if rollout.Spec.Strategy.Canary != nil {
-		return "canary"
-	}
-	return "No Strategy listed"
 }
 
 func GetProgressDeadlineSecondsOrDefault(rollout *v1alpha1.Rollout) int32 {

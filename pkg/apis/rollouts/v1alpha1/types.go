@@ -1,11 +1,14 @@
 package v1alpha1
 
 import (
+	"encoding/json"
 	"strconv"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
@@ -30,6 +33,8 @@ type Rollout struct {
 
 // RolloutSpec is the spec for a Rollout resource
 type RolloutSpec struct {
+	TemplateResolvedFromRef bool `json:"-"`
+	SelectorResolvedFromRef bool `json:"-"`
 	// Number of desired pods. This is a pointer to distinguish between explicit
 	// zero and not specified. Defaults to 1.
 	// +optional
@@ -37,9 +42,14 @@ type RolloutSpec struct {
 	// Label selector for pods. Existing ReplicaSets whose pods are
 	// selected by this will be the ones affected by this rollout.
 	// It must match the pod template's labels.
+	// +optional
 	Selector *metav1.LabelSelector `json:"selector" protobuf:"bytes,2,opt,name=selector"`
 	// Template describes the pods that will be created.
+	// +optional
 	Template corev1.PodTemplateSpec `json:"template" protobuf:"bytes,3,opt,name=template"`
+	// WorkloadRef holds a references to a workload that provides Pod template
+	// +optional
+	WorkloadRef *ObjectRef `json:"workloadRef,omitempty" protobuf:"bytes,10,opt,name=workloadRef"`
 	// Minimum number of seconds for which a newly created pod should be ready
 	// without any of its container crashing, for it to be considered available.
 	// Defaults to 0 (pod will be considered available as soon as it is ready)
@@ -61,6 +71,62 @@ type RolloutSpec struct {
 	ProgressDeadlineSeconds *int32 `json:"progressDeadlineSeconds,omitempty" protobuf:"varint,8,opt,name=progressDeadlineSeconds"`
 	// RestartAt indicates when all the pods of a Rollout should be restarted
 	RestartAt *metav1.Time `json:"restartAt,omitempty" protobuf:"bytes,9,opt,name=restartAt"`
+}
+
+func (s *RolloutSpec) SetResolvedSelector(selector *metav1.LabelSelector) {
+	s.SelectorResolvedFromRef = true
+	s.Selector = selector
+}
+
+func (s *RolloutSpec) SetResolvedTemplate(template corev1.PodTemplateSpec) {
+	s.TemplateResolvedFromRef = true
+	s.Template = template
+}
+
+func (s *RolloutSpec) EmptyTemplate() bool {
+	if len(s.Template.Labels) > 0 {
+		return false
+	}
+	if len(s.Template.Annotations) > 0 {
+		return false
+	}
+	return true
+}
+
+func (s *RolloutSpec) MarshalJSON() ([]byte, error) {
+	type Alias RolloutSpec
+
+	if s.TemplateResolvedFromRef || s.SelectorResolvedFromRef {
+		obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&struct {
+			Alias `json:",inline"`
+		}{
+			Alias: (Alias)(*s),
+		})
+		if err != nil {
+			return nil, err
+		}
+		if s.TemplateResolvedFromRef {
+			unstructured.RemoveNestedField(obj, "template")
+		}
+		if s.SelectorResolvedFromRef {
+			unstructured.RemoveNestedField(obj, "selector")
+		}
+
+		return json.Marshal(obj)
+	}
+	return json.Marshal(&struct{ *Alias }{
+		Alias: (*Alias)(s),
+	})
+}
+
+// ObjectRef holds a references to the Kubernetes object
+type ObjectRef struct {
+	// API Version of the referent
+	APIVersion string `json:"apiVersion,omitempty" protobuf:"bytes,1,opt,name=apiVersion"`
+	// Kind of the referent
+	Kind string `json:"kind,omitempty" protobuf:"bytes,2,opt,name=kind"`
+	// Name of the referent
+	Name string `json:"name,omitempty" protobuf:"bytes,3,opt,name=name"`
 }
 
 const (
@@ -286,8 +352,8 @@ type IstioTrafficRouting struct {
 type IstioVirtualService struct {
 	// Name holds the name of the VirtualService
 	Name string `json:"name" protobuf:"bytes,1,opt,name=name"`
-	// Routes list of routes within VirtualService to edit
-	Routes []string `json:"routes" protobuf:"bytes,2,rep,name=routes"`
+	// Routes are list of routes within VirtualService to edit. If omitted, VirtualService must have a single route
+	Routes []string `json:"routes,omitempty" protobuf:"bytes,2,rep,name=routes"`
 }
 
 // IstioDestinationRule is a reference to an Istio DestinationRule to modify and shape traffic
@@ -487,7 +553,7 @@ type RolloutPause struct {
 func (p RolloutPause) DurationSeconds() int32 {
 	if p.Duration != nil {
 		if p.Duration.Type == intstr.String {
-			s, err := strconv.Atoi(p.Duration.StrVal)
+			s, err := strconv.ParseInt(p.Duration.StrVal, 10, 32)
 			if err != nil {
 				d, err := time.ParseDuration(p.Duration.StrVal)
 				if err != nil {
@@ -536,6 +602,20 @@ type PauseCondition struct {
 	StartTime metav1.Time `json:"startTime" protobuf:"bytes,2,opt,name=startTime"`
 }
 
+// RolloutPhase are a set of phases that this rollout
+type RolloutPhase string
+
+const (
+	// RolloutPhaseHealthy indicates a rollout is healthy
+	RolloutPhaseHealthy RolloutPhase = "Healthy"
+	// RolloutPhaseDegraded indicates a rollout is degraded (e.g. pod unavailability, misconfiguration)
+	RolloutPhaseDegraded RolloutPhase = "Degraded"
+	// RolloutPhaseProgressing indicates a rollout is not yet healthy but still making progress towards a healthy state
+	RolloutPhaseProgressing RolloutPhase = "Progressing"
+	// RolloutPhasePaused indicates a rollout is not yet healthy and will not make progress until unpaused
+	RolloutPhasePaused RolloutPhase = "Paused"
+)
+
 // RolloutStatus is the status for a Rollout resource
 type RolloutStatus struct {
 	// Abort cancel the current rollout progression
@@ -581,9 +661,12 @@ type RolloutStatus struct {
 	// newest ReplicaSet.
 	// +optional
 	CollisionCount *int32 `json:"collisionCount,omitempty" protobuf:"varint,12,opt,name=collisionCount"`
-	// The generation observed by the rollout controller by taking a hash of the spec.
+	// The generation observed by the rollout controller from metadata.generation
 	// +optional
 	ObservedGeneration string `json:"observedGeneration,omitempty" protobuf:"bytes,13,opt,name=observedGeneration"`
+	// The generation of referenced workload observed by the rollout controller
+	// +optional
+	WorkloadObservedGeneration string `json:"workloadObservedGeneration,omitempty" protobuf:"bytes,24,opt,name=workloadObservedGeneration"`
 	// Conditions a list of conditions a rollout can have.
 	// +optional
 	Conditions []RolloutCondition `json:"conditions,omitempty" protobuf:"bytes,14,rep,name=conditions"`
@@ -606,6 +689,10 @@ type RolloutStatus struct {
 	RestartedAt *metav1.Time `json:"restartedAt,omitempty" protobuf:"bytes,20,opt,name=restartedAt"`
 	// PromoteFull indicates if the rollout should perform a full promotion, skipping analysis and pauses.
 	PromoteFull bool `json:"promoteFull,omitempty" protobuf:"varint,21,opt,name=promoteFull"`
+	// Phase is the rollout phase. Clients should only rely on the value if status.observedGeneration equals metadata.generation
+	Phase RolloutPhase `json:"phase,omitempty" protobuf:"bytes,22,opt,name=phase,casttype=RolloutPhase"`
+	// Message provides details on why the rollout is in its current phase
+	Message string `json:"message,omitempty" protobuf:"bytes,23,opt,name=message"`
 }
 
 // BlueGreenStatus status fields that only pertain to the blueGreen rollout

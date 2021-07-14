@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/argoproj/argo-rollouts/utils/queue"
+
 	log "github.com/sirupsen/logrus"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -58,7 +60,7 @@ type IstioController struct {
 func NewIstioController(cfg IstioControllerConfig) *IstioController {
 	c := IstioController{
 		IstioControllerConfig:    cfg,
-		destinationRuleWorkqueue: workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "DestinationRules"),
+		destinationRuleWorkqueue: workqueue.NewNamedRateLimitingQueue(queue.DefaultArgoRolloutsRateLimiter(), "DestinationRules"),
 		VirtualServiceLister:     dynamiclister.New(cfg.VirtualServiceInformer.GetIndexer(), istioutil.GetIstioVirtualServiceGVR()),
 		DestinationRuleLister:    dynamiclister.New(cfg.DestinationRuleInformer.GetIndexer(), istioutil.GetIstioDestinationRuleGVR()),
 	}
@@ -181,11 +183,14 @@ func (c *IstioController) GetReferencedVirtualServices(ro *v1alpha1.Rollout) (*[
 		if canary.TrafficRouting != nil && canary.TrafficRouting.Istio != nil {
 			var vsvc *unstructured.Unstructured
 			var err error
-			vsvcName := canary.TrafficRouting.Istio.VirtualService.Name
+			vsvcNamespace, vsvcName := istioutil.GetVirtualServiceNamespaceName(canary.TrafficRouting.Istio.VirtualService.Name)
+			if vsvcNamespace == "" {
+				vsvcNamespace = ro.Namespace
+			}
 			if c.VirtualServiceInformer.HasSynced() {
-				vsvc, err = c.VirtualServiceLister.Namespace(ro.Namespace).Get(vsvcName)
+				vsvc, err = c.VirtualServiceLister.Namespace(vsvcNamespace).Get(vsvcName)
 			} else {
-				vsvc, err = c.DynamicClientSet.Resource(istioutil.GetIstioVirtualServiceGVR()).Namespace(ro.Namespace).Get(ctx, vsvcName, metav1.GetOptions{})
+				vsvc, err = c.DynamicClientSet.Resource(istioutil.GetIstioVirtualServiceGVR()).Namespace(vsvcNamespace).Get(ctx, vsvcName, metav1.GetOptions{})
 			}
 
 			if k8serrors.IsNotFound(err) {

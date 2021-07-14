@@ -4,7 +4,8 @@ go 1.16
 
 require (
 	github.com/antonmedv/expr v1.8.9
-	github.com/argoproj/pkg v0.7.0
+	github.com/argoproj/notifications-engine v0.2.1-0.20210525191332-e8e293898477
+	github.com/argoproj/pkg v0.9.0
 	github.com/aws/aws-sdk-go-v2/config v1.0.0
 	github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2 v1.0.0
 	github.com/docker/spdystream v0.0.0-20181023171402-6480d4af844c // indirect
@@ -12,21 +13,24 @@ require (
 	github.com/ghodss/yaml v1.0.1-0.20190212211648-25d852aebe32
 	github.com/go-openapi/spec v0.19.3
 	github.com/gogo/protobuf v1.3.2
+	github.com/golang/mock v1.4.4
 	github.com/golang/protobuf v1.4.3
 	github.com/gregjones/httpcache v0.0.0-20190611155906-901d90724c79 // indirect
 	github.com/grpc-ecosystem/grpc-gateway v1.16.0
 	github.com/hashicorp/golang-lru v0.5.4 // indirect
 	github.com/juju/ansiterm v0.0.0-20180109212912-720a0952cc2a
 	github.com/lunixbochs/vtclean v1.0.0 // indirect
+	github.com/mitchellh/mapstructure v1.3.3
 	github.com/newrelic/newrelic-client-go v0.49.0
 	github.com/pkg/errors v0.9.1
-	github.com/prometheus/client_golang v1.8.0
-	github.com/prometheus/common v0.18.0
+	github.com/prometheus/client_golang v1.10.0
+	github.com/prometheus/client_model v0.2.0
+	github.com/prometheus/common v0.21.0
 	github.com/servicemeshinterface/smi-sdk-go v0.4.1
 	github.com/sirupsen/logrus v1.7.0
 	github.com/soheilhy/cmux v0.1.4
 	github.com/spaceapegames/go-wavefront v1.8.1
-	github.com/spf13/cobra v1.1.1
+	github.com/spf13/cobra v1.1.3
 	github.com/stretchr/testify v1.7.0
 	github.com/tj/assert v0.0.3
 	github.com/undefinedlabs/go-mpatch v1.0.6
@@ -46,7 +50,7 @@ require (
 	k8s.io/client-go v0.20.4
 	k8s.io/code-generator v0.20.4
 	k8s.io/component-base v0.20.4
-	k8s.io/klog v1.0.0
+	k8s.io/klog/v2 v2.5.0
 	k8s.io/kube-openapi v0.0.0-20210216185858-15cd8face8d6
 	k8s.io/kubectl v0.19.4
 	k8s.io/kubernetes v1.20.4
@@ -54,6 +58,7 @@ require (
 )
 
 replace (
+	github.com/go-check/check => github.com/go-check/check v0.0.0-20180628173108-788fd7840127
 	github.com/grpc-ecosystem/grpc-gateway => github.com/grpc-ecosystem/grpc-gateway v1.16.0
 	k8s.io/api => k8s.io/api v0.20.4
 	k8s.io/apiextensions-apiserver => k8s.io/apiextensions-apiserver v0.20.4

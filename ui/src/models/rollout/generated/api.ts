@@ -551,6 +551,31 @@ export interface GithubComArgoprojArgoRolloutsPkgApisRolloutsV1alpha1NginxTraffi
 /**
  * 
  * @export
+ * @interface GithubComArgoprojArgoRolloutsPkgApisRolloutsV1alpha1ObjectRef
+ */
+export interface GithubComArgoprojArgoRolloutsPkgApisRolloutsV1alpha1ObjectRef {
+    /**
+     * 
+     * @type {string}
+     * @memberof GithubComArgoprojArgoRolloutsPkgApisRolloutsV1alpha1ObjectRef
+     */
+    apiVersion?: string;
+    /**
+     * 
+     * @type {string}
+     * @memberof GithubComArgoprojArgoRolloutsPkgApisRolloutsV1alpha1ObjectRef
+     */
+    kind?: string;
+    /**
+     * 
+     * @type {string}
+     * @memberof GithubComArgoprojArgoRolloutsPkgApisRolloutsV1alpha1ObjectRef
+     */
+    name?: string;
+}
+/**
+ * 
+ * @export
  * @interface GithubComArgoprojArgoRolloutsPkgApisRolloutsV1alpha1PauseCondition
  */
 export interface GithubComArgoprojArgoRolloutsPkgApisRolloutsV1alpha1PauseCondition {
@@ -892,6 +917,12 @@ export interface GithubComArgoprojArgoRolloutsPkgApisRolloutsV1alpha1RolloutSpec
      * @memberof GithubComArgoprojArgoRolloutsPkgApisRolloutsV1alpha1RolloutSpec
      */
     template?: K8sIoApiCoreV1PodTemplateSpec;
+    /**
+     * 
+     * @type {GithubComArgoprojArgoRolloutsPkgApisRolloutsV1alpha1ObjectRef}
+     * @memberof GithubComArgoprojArgoRolloutsPkgApisRolloutsV1alpha1RolloutSpec
+     */
+    workloadRef?: GithubComArgoprojArgoRolloutsPkgApisRolloutsV1alpha1ObjectRef;
     /**
      * 
      * @type {number}
@@ -4791,6 +4822,12 @@ export interface RolloutNamespaceInfo {
      * @memberof RolloutNamespaceInfo
      */
     namespace?: string;
+    /**
+     *
+     * @type {Array<string>}
+     * @memberof RolloutNamespaceInfo
+     */
+    availableNamespaces?: Array<string>;
 }
 /**
  * 
@@ -4847,6 +4884,12 @@ export interface RolloutPromoteRolloutRequest {
      * @memberof RolloutPromoteRolloutRequest
      */
     namespace?: string;
+    /**
+     * 
+     * @type {boolean}
+     * @memberof RolloutPromoteRolloutRequest
+     */
+    full?: boolean;
 }
 /**
  * 

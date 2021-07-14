@@ -19,13 +19,13 @@ the rollout is healthy upon completion and an error otherwise.`
 	%[1]s status guestbook
 
 	# Watch the rollout until it succeeds, fail if it takes more than 60 seconds
-	%[1]s status --timeout 60 guestbook
+	%[1]s status --timeout 60s guestbook
 	`
 )
 
 type StatusOptions struct {
 	Watch   bool
-	Timeout int64
+	Timeout time.Duration
 
 	options.ArgoRolloutsOptions
 }
@@ -65,8 +65,8 @@ func NewCmdStatus(o *options.ArgoRolloutsOptions) *cobra.Command {
 				controller.RegisterCallback(func(roInfo *rollout.RolloutInfo) {
 					rolloutUpdates <- roInfo
 				})
-				go statusOptions.WatchStatus(ctx.Done(), cancel, statusOptions.Timeout, rolloutUpdates)
-				controller.Run(ctx)
+				go controller.Run(ctx)
+				statusOptions.WatchStatus(ctx.Done(), rolloutUpdates)
 
 				finalRi, err := controller.GetRolloutInfo()
 				if err != nil {
@@ -84,18 +84,18 @@ func NewCmdStatus(o *options.ArgoRolloutsOptions) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVarP(&statusOptions.Watch, "watch", "w", true, "Watch the status of the rollout until it's done")
-	cmd.Flags().Int64VarP(&statusOptions.Timeout, "timeout", "t", 0, "The length of time in seconds to watch before giving up, zero means wait forever")
+	cmd.Flags().DurationVarP(&statusOptions.Timeout, "timeout", "t", time.Duration(0), "The length of time to watch before giving up. Non-zero values should contain a corresponding time unit (e.g. 1s, 2m, 3h). Zero means wait forever")
 	return cmd
 }
 
-func (o *StatusOptions) WatchStatus(stopCh <-chan struct{}, cancelFunc context.CancelFunc, timeoutSeconds int64, rolloutUpdates chan *rollout.RolloutInfo) {
+func (o *StatusOptions) WatchStatus(stopCh <-chan struct{}, rolloutUpdates chan *rollout.RolloutInfo) string {
 	timeout := make(chan bool)
 	var roInfo *rollout.RolloutInfo
 	var preventFlicker time.Time
 
-	if timeoutSeconds != 0 {
+	if o.Timeout != 0 {
 		go func() {
-			time.Sleep(time.Duration(timeoutSeconds) * time.Second)
+			time.Sleep(o.Timeout)
 			timeout <- true
 		}()
 	}
@@ -105,18 +105,16 @@ func (o *StatusOptions) WatchStatus(stopCh <-chan struct{}, cancelFunc context.C
 		case roInfo = <-rolloutUpdates:
 			if roInfo != nil && roInfo.Status == "Healthy" || roInfo.Status == "Degraded" {
 				fmt.Fprintln(o.Out, roInfo.Status)
-				cancelFunc()
-				return
+				return roInfo.Status
 			}
 			if roInfo != nil && time.Now().After(preventFlicker.Add(200*time.Millisecond)) {
 				fmt.Fprintf(o.Out, "%s - %s\n", roInfo.Status, roInfo.Message)
 				preventFlicker = time.Now()
 			}
 		case <-stopCh:
-			return
+			return ""
 		case <-timeout:
-			cancelFunc()
-			return
+			return ""
 		}
 	}
 }
